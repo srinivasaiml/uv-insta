@@ -1,0 +1,6 @@
+name = "insta-downloader-api"
+main = "index.js"
+compatibility_date = "2023-05-18"
+
+[vars]
+# You can add environment variables here if needed
