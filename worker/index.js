@@ -99,20 +99,25 @@ export default {
             "X-Requested-With": "XMLHttpRequest"
           });
           if (aRes.ok) {
-            const aData = await aRes.json();
-            const item = aData?.items?.[0];
-            if (item) {
-              video = item.video_versions?.[0]?.url || "";
-              thumbnail = item.image_versions2?.candidates?.[0]?.url || thumbnail;
-            }
+            const text = await aRes.text();
+            try {
+              const aData = JSON.parse(text);
+              const item = aData?.items?.[0];
+              if (item) {
+                video = item.video_versions?.[0]?.url || "";
+                thumbnail = item.image_versions2?.candidates?.[0]?.url || thumbnail;
+              }
+            } catch (e) { console.error("JSON Parse failed for API v1"); }
           }
         } catch (e) { console.error("API v1 failed:", e.message); }
       }
 
-      // Strategy 3: RapidAPI Fallback (Inside Worker)
+      // Strategy 3: Internal Fallback API
       if (!video) {
         try {
-          const rRes = await fetch(`https://api.vkrtool.com/api/instagram?url=${encodeURIComponent(cleanUrl)}`);
+          const rRes = await fetch(`https://api.vkrtool.com/api/instagram?url=${encodeURIComponent(cleanUrl)}`, {
+            signal: AbortSignal.timeout(5000)
+          });
           if (rRes.ok) {
             const rData = await rRes.json();
             if (rData?.data?.[0]?.url) {
@@ -123,12 +128,12 @@ export default {
         } catch (e) { console.error("Internal Fallback failed:", e.message); }
       }
 
-      if (!video && !thumbnail) {
+      if (!video) {
         return new Response(JSON.stringify({ 
           success: false, 
-          error: "Media not found. The post might be private, deleted, or restricted by Instagram." 
+          error: "Instagram blocked the request. This often happens in production. Try again in a few minutes or use a different link." 
         }), {
-          status: 404,
+          status: 403,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
@@ -136,7 +141,7 @@ export default {
       return new Response(JSON.stringify({ 
         success: true,
         video: video.replace(/\\u0026/g, "&").replace(/\\/g, ""), 
-        thumbnail: thumbnail.replace(/\\u0026/g, "&").replace(/\\/g, "") 
+        thumbnail: (thumbnail || "").replace(/\\u0026/g, "&").replace(/\\/g, "") 
       }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -144,7 +149,8 @@ export default {
     } catch (err) {
       return new Response(JSON.stringify({ 
         success: false, 
-        error: "Server Error: " + err.message 
+        error: "Internal Error: " + err.message,
+        debug: "Check if the Instagram link is public."
       }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
