@@ -1,5 +1,3 @@
-import * as cheerio from "cheerio";
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
@@ -16,26 +14,26 @@ export default {
     let instaUrl = url.searchParams.get("url");
     const isProxy = url.searchParams.get("proxy") === "true";
 
+    // ── Proxy mode: stream media back with download headers ──
     if (isProxy && instaUrl) {
-      const mediaRes = await fetch(instaUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          "Referer": "https://www.instagram.com/",
+      try {
+        const mediaRes = await fetch(instaUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Referer": "https://www.instagram.com/",
+          }
+        });
+        const responseHeaders = new Headers(mediaRes.headers);
+        responseHeaders.set("Access-Control-Allow-Origin", "*");
+        if (instaUrl.includes(".mp4") || mediaRes.headers.get("Content-Type")?.includes("video")) {
+          responseHeaders.set("Content-Disposition", `attachment; filename="instagram-video-${Date.now()}.mp4"`);
         }
-      });
-      
-      const responseHeaders = new Headers(mediaRes.headers);
-      responseHeaders.set("Access-Control-Allow-Origin", "*");
-      
-      // If it's a video, force download
-      if (instaUrl.includes(".mp4") || mediaRes.headers.get("Content-Type")?.includes("video")) {
-        responseHeaders.set("Content-Disposition", `attachment; filename="instagram-video-${Date.now()}.mp4"`);
+        return new Response(mediaRes.body, { status: mediaRes.status, headers: responseHeaders });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: "Proxy failed: " + e.message }), {
+          status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
       }
-
-      return new Response(mediaRes.body, {
-        status: mediaRes.status,
-        headers: responseHeaders,
-      });
     }
 
     if (!instaUrl) {
@@ -45,187 +43,188 @@ export default {
       );
     }
 
+    const cleanUrl = instaUrl.split("?")[0].replace(/\/$/, "");
+
+    let video = "";
+    let thumbnail = "";
+    const errors = [];
+
+    // ── Strategy 1: RapidAPI Instagram Downloader (instagram-downloader-download-videos-reels-stories4.p.rapidapi.com) ──
     try {
-      const cleanUrl = instaUrl.split("?")[0].replace(/\/$/, "");
-      const shortcode = extractShortcode(cleanUrl);
-
-      if (!shortcode) {
-        throw new Error("Invalid Instagram URL. Please provide a post or reel link.");
-      }
-
-      let video = "";
-      let thumbnail = "";
-
-      const userAgents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1"
-      ];
-      const randomUA = userAgents[Math.floor(Math.random() * userAgents.length)];
-
-      const fetchIG = (url, extraHeaders = {}) => fetch(url, {
-        headers: {
-          "User-Agent": randomUA,
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-          "Sec-Fetch-Dest": "document",
-          "Sec-Fetch-Mode": "navigate",
-          "Sec-Fetch-Site": "none",
-          "Sec-Fetch-User": "?1",
-          "Upgrade-Insecure-Requests": "1",
-          "Referer": "https://www.instagram.com/",
-          ...extraHeaders
+      const r = await fetch(
+        `https://social-media-video-downloader.p.rapidapi.com/smvd/get/all?url=${encodeURIComponent(cleanUrl)}`,
+        {
+          headers: {
+            "X-RapidAPI-Key": "a0186d2de0msh9b3d0cbdb87b1fdp1c96d9jsna43ed7e06bdc",
+            "X-RapidAPI-Host": "social-media-video-downloader.p.rapidapi.com",
+          },
+          signal: AbortSignal.timeout(8000),
         }
-      });
+      );
+      if (r.ok) {
+        const d = await r.json();
+        const links = d?.links || [];
+        const mp4 = links.find(l => l.type === "mp4" || (l.url && l.url.includes(".mp4")));
+        if (mp4?.url) { video = mp4.url; thumbnail = d?.picture || ""; }
+      } else {
+        errors.push("Strategy1 HTTP " + r.status);
+      }
+    } catch (e) { errors.push("Strategy1: " + e.message); }
 
-      // Strategy 1: Embed Page (Most reliable for videos)
+    // ── Strategy 2: SaveFrom / SnapSave style API ──
+    if (!video) {
+      try {
+        const r = await fetch(
+          `https://instagram-downloader-download-videos-reels-stories4.p.rapidapi.com/fetch/?url=${encodeURIComponent(cleanUrl)}`,
+          {
+            headers: {
+              "X-RapidAPI-Key": "a0186d2de0msh9b3d0cbdb87b1fdp1c96d9jsna43ed7e06bdc",
+              "X-RapidAPI-Host": "instagram-downloader-download-videos-reels-stories4.p.rapidapi.com",
+            },
+            signal: AbortSignal.timeout(8000),
+          }
+        );
+        if (r.ok) {
+          const d = await r.json();
+          if (d?.video_url) { video = d.video_url; thumbnail = d?.thumbnail_url || ""; }
+          else if (d?.url) { video = d.url; thumbnail = d?.thumbnail || ""; }
+        } else {
+          errors.push("Strategy2 HTTP " + r.status);
+        }
+      } catch (e) { errors.push("Strategy2: " + e.message); }
+    }
+
+    // ── Strategy 3: Insta-Downloader via RapidAPI ──
+    if (!video) {
+      try {
+        const r = await fetch(
+          `https://instagram-downloader2.p.rapidapi.com/download?url=${encodeURIComponent(cleanUrl)}`,
+          {
+            headers: {
+              "X-RapidAPI-Key": "a0186d2de0msh9b3d0cbdb87b1fdp1c96d9jsna43ed7e06bdc",
+              "X-RapidAPI-Host": "instagram-downloader2.p.rapidapi.com",
+            },
+            signal: AbortSignal.timeout(8000),
+          }
+        );
+        if (r.ok) {
+          const d = await r.json();
+          if (d?.data?.url) { video = d.data.url; thumbnail = d?.data?.thumbnail || ""; }
+          else if (Array.isArray(d?.data)) {
+            const item = d.data.find(x => x.type === "video" || x.url?.includes(".mp4"));
+            if (item?.url) { video = item.url; thumbnail = item.thumbnail || ""; }
+          }
+        } else {
+          errors.push("Strategy3 HTTP " + r.status);
+        }
+      } catch (e) { errors.push("Strategy3: " + e.message); }
+    }
+
+    // ── Strategy 4: SnapInsta / SaveInsta public API ──
+    if (!video) {
+      try {
+        const r = await fetch("https://snapinsta.io/api/ajaxSearch", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://snapinsta.io/",
+            "Origin": "https://snapinsta.io",
+          },
+          body: `q=${encodeURIComponent(cleanUrl)}&t=media&lang=en`,
+          signal: AbortSignal.timeout(8000),
+        });
+        if (r.ok) {
+          const d = await r.json();
+          if (d?.data) {
+            // Parse HTML response to extract video URL
+            const urlMatch = d.data.match(/href="(https[^"]+\.mp4[^"]*?)"/);
+            if (urlMatch?.[1]) { video = urlMatch[1].replace(/&amp;/g, "&"); }
+            const thumbMatch = d.data.match(/src="(https[^"]+\.(jpg|jpeg|webp)[^"]*?)"/);
+            if (thumbMatch?.[1]) { thumbnail = thumbMatch[1].replace(/&amp;/g, "&"); }
+          }
+        } else {
+          errors.push("Strategy4 HTTP " + r.status);
+        }
+      } catch (e) { errors.push("Strategy4: " + e.message); }
+    }
+
+    // ── Strategy 5: SaveVideo.me API ──
+    if (!video) {
+      try {
+        const r = await fetch(`https://savevideo.me/api/?url=${encodeURIComponent(cleanUrl)}`, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Referer": "https://savevideo.me/",
+          },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (r.ok) {
+          const text = await r.text();
+          const videoMatch = text.match(/"url":"(https[^"]+\.mp4[^"]*)"/);
+          if (videoMatch?.[1]) { video = videoMatch[1].replace(/\\u0026/g, "&").replace(/\\/g, ""); }
+        } else {
+          errors.push("Strategy5 HTTP " + r.status);
+        }
+      } catch (e) { errors.push("Strategy5: " + e.message); }
+    }
+
+    // ── Strategy 6: Instagram Embed (fallback, may work for some regions) ──
+    if (!video) {
       try {
         const embedUrl = `${cleanUrl}/embed/captioned/?cr=1&v=12&wp=1080`;
-        const eRes = await fetchIG(embedUrl);
-        if (eRes.ok) {
-          const html = await eRes.text();
-          const { v, t } = parseHtml(html);
-          if (v) video = v;
-          if (t) thumbnail = t;
-        }
-      } catch (e) { console.error("Embed failed:", e.message); }
-
-      // Strategy 2: API v1
-      if (!video) {
-        try {
-          const mediaId = shortcodeToId(shortcode);
-          const aRes = await fetchIG(`https://www.instagram.com/api/v1/media/${mediaId}/info/`, {
-            "X-IG-App-ID": "936619743392459",
-            "X-Requested-With": "XMLHttpRequest"
-          });
-          if (aRes.ok) {
-            const text = await aRes.text();
-            try {
-              const aData = JSON.parse(text);
-              const item = aData?.items?.[0];
-              if (item) {
-                video = item.video_versions?.[0]?.url || "";
-                thumbnail = item.image_versions2?.candidates?.[0]?.url || thumbnail;
-              }
-            } catch (e) { console.error("JSON Parse failed for API v1"); }
-          }
-        } catch (e) { console.error("API v1 failed:", e.message); }
-      }
-
-      // Strategy 3: Internal Fallback API
-      if (!video) {
-        try {
-          const rRes = await fetch(`https://api.vkrtool.com/api/instagram?url=${encodeURIComponent(cleanUrl)}`, {
-            signal: AbortSignal.timeout(5000)
-          });
-          if (rRes.ok) {
-            const rData = await rRes.json();
-            if (rData?.data?.[0]?.url) {
-              video = rData.data[0].url;
-              thumbnail = rData.data[0].thumbnail || thumbnail;
+        const r = await fetch(embedUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.instagram.com/",
+          },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (r.ok) {
+          const html = await r.text();
+          const videoPatterns = [
+            /"video_url":"(https[^"]+)"/,
+            /"playable_url":"(https[^"]+)"/,
+            /"contentUrl":"(https[^"]+)"/,
+            /videoSrc\s*=\s*"(https[^"]+)"/,
+          ];
+          for (const pat of videoPatterns) {
+            const m = html.match(pat);
+            if (m?.[1]) {
+              video = m[1].replace(/\\u0026/g, "&").replace(/\\/g, "");
+              if (video.includes(".mp4")) break;
             }
           }
-        } catch (e) { console.error("Internal Fallback failed:", e.message); }
-      }
+          if (!thumbnail) {
+            const tMatch = html.match(/<meta property="og:image" content="([^"]+)"/);
+            if (tMatch?.[1]) thumbnail = tMatch[1];
+          }
+        } else {
+          errors.push("Strategy6 HTTP " + r.status);
+        }
+      } catch (e) { errors.push("Strategy6: " + e.message); }
+    }
 
-      if (!video) {
-        return new Response(JSON.stringify({ 
-          success: false, 
-          error: "Instagram blocked the request. This often happens in production. Try again in a few minutes or use a different link." 
-        }), {
-          status: 403,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        });
-      }
-
-      return new Response(JSON.stringify({ 
-        success: true,
-        video: video.replace(/\\u0026/g, "&").replace(/\\/g, ""), 
-        thumbnail: (thumbnail || "").replace(/\\u0026/g, "&").replace(/\\/g, "") 
+    // ── Response ──
+    if (!video) {
+      return new Response(JSON.stringify({
+        success: false,
+        error: "Could not extract media. Instagram may have blocked all routes. Try again in a minute.",
+        debug: errors.join(" | "),
       }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-
-    } catch (err) {
-      return new Response(JSON.stringify({ 
-        success: false, 
-        error: "Internal Error: " + err.message,
-        debug: "Check if the Instagram link is public."
-      }), {
-        status: 500,
+        status: 403,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
+
+    return new Response(JSON.stringify({
+      success: true,
+      video: video.replace(/\\u0026/g, "&").replace(/\\/g, ""),
+      thumbnail: (thumbnail || "").replace(/\\u0026/g, "&").replace(/\\/g, ""),
+    }), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   },
 };
-
-function extractShortcode(url) {
-  const m = url.match(/(?:reel|p|tv|reels)\/([A-Za-z0-9_-]+)/);
-  return m ? m[1] : null;
-}
-
-function shortcodeToId(shortcode) {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-  let id = BigInt(0);
-  for (const char of shortcode) {
-    id = id * BigInt(64) + BigInt(alphabet.indexOf(char));
-  }
-  return id.toString();
-}
-
-function parseHtml(html) {
-  let video = "";
-  let thumbnail = "";
-  
-  // Strategy A: Direct Regex Search (Fastest)
-  const videoPatterns = [
-    /"video_url":"(https[^"]+)"/,
-    /video_url\\":\\"(https[^"]+)\\"/,
-    /"playable_url":"(https[^"]+)"/,
-    /playable_url\\":\\"(https[^"]+)\\"/,
-    /"contentUrl":"(https[^"]+)"/,
-    /videoSrc\s*=\s*"(https[^"]+)"/,
-    /\"video_url\"\:\"(.*?)\"/
-  ];
-
-  for (const pat of videoPatterns) {
-    const match = html.match(pat);
-    if (match && match[1]) {
-      video = match[1].replace(/\\u0026/g, "&").replace(/\\/g, "");
-      if (video.includes(".mp4")) break;
-    }
-  }
-
-  // Strategy B: Script Tag Analysis (Most reliable)
-  if (!video) {
-    const $ = cheerio.load(html);
-    $("script").each((_, script) => {
-      const content = $(script).html();
-      if (!content) return;
-
-      // Look for JSON objects containing media info
-      if (content.includes("video_url") || content.includes("playable_url")) {
-        const vMatch = content.match(/"video_url":"(https:[^"]+)"/);
-        if (vMatch && vMatch[1]) {
-          video = vMatch[1].replace(/\\u0026/g, "&").replace(/\\/g, "");
-        }
-      }
-    });
-  }
-
-  const $ = cheerio.load(html);
-  if (!video) {
-    video = $('meta[property="og:video"]').attr("content") ||
-            $('meta[property="og:video:secure_url"]').attr("content") ||
-            $('meta[name="twitter:player:stream"]').attr("content") || "";
-  }
-
-  thumbnail = $('meta[property="og:image"]').attr("content") ||
-              $('meta[name="twitter:image"]').attr("content") ||
-              $('meta[property="og:image:secure_url"]').attr("content") || "";
-
-  return { 
-    v: video.replace(/\\u0026/g, "&").replace(/\\/g, ""), 
-    t: thumbnail.replace(/\\u0026/g, "&").replace(/\\/g, "") 
-  };
-}
