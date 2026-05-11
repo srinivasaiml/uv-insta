@@ -36,30 +36,19 @@ function App() {
     setLoading(true); setLoadingText('Searching Media...'); setError(null); setResult(null);
     try {
       if (!url.includes('instagram.com/')) throw new Error('Please enter a valid Instagram URL');
-      let found = false;
-
-      try {
-        setLoadingText('Extracting media...');
-        const res = await axios.get(`${workerUrl}?url=${encodeURIComponent(url)}`, { timeout: 8000 });
-        if (res.data?.success && res.data?.video) {
-          setResult({ video: res.data.video, thumbnail: res.data.thumbnail || '' });
-          found = true;
-        }
-      } catch (e: any) { console.log('Worker:', e.message); }
-
-      if (!found) {
-        try {
-          setLoadingText('Trying fallback...');
-          const target = `https://ig-saver.vercel.app/api/ig?url=${encodeURIComponent(url)}`;
-          const res = await axios.get(`https://api.allorigins.win/get?url=${encodeURIComponent(target)}`);
-          const data = JSON.parse(res.data.contents);
-          if (data?.url) { setResult({ video: data.url, thumbnail: data.thumbnail || '' }); found = true; }
-        } catch (e) { console.log('Fallback failed'); }
+      
+      setLoadingText('Connecting to extractor...');
+      const res = await axios.get(`${workerUrl}?url=${encodeURIComponent(url)}`, { timeout: 15000 });
+      
+      if (res.data?.success && res.data?.video) {
+        setResult({ video: res.data.video, thumbnail: res.data.thumbnail || '' });
+      } else {
+        throw new Error(res.data?.error || 'Failed to extract media.');
       }
-
-      if (!found) throw new Error('Could not extract media. Please ensure the post is public and try again.');
     } catch (err: any) {
-      setError(err.message || 'Extraction failed. Please try again.');
+      console.error("Download Error:", err);
+      const msg = err.response?.data?.error || err.message || 'Extraction failed. Please try again.';
+      setError(msg);
     } finally { setLoading(false); }
   };
 
@@ -272,16 +261,15 @@ function App() {
                     <div className="relative aspect-[9/16] rounded-[28px] overflow-hidden" style={{ background: 'linear-gradient(160deg,#fce4b8,#f9c8d4,#e8d5f5)' }}>
                       {result.thumbnail ? (
                         <img
-                          src={`https://api.allorigins.win/raw?url=${encodeURIComponent(result.thumbnail)}`}
+                          src={`${workerUrl}?proxy=true&url=${encodeURIComponent(result.thumbnail || '')}`}
                           alt="Preview"
-                          crossOrigin="anonymous"
                           className="w-full h-full object-cover"
                           onError={e => {
                             const img = e.target as HTMLImageElement;
-                            // Try worker proxy next
-                            if (!img.dataset.triedWorker) {
-                              img.dataset.triedWorker = '1';
-                              img.src = `${workerUrl}?proxy=true&url=${encodeURIComponent(result.thumbnail || '')}`;
+                            // Try AllOrigins as fallback if worker fails
+                            if (!img.dataset.triedAllOrigins) {
+                              img.dataset.triedAllOrigins = '1';
+                              img.src = `https://api.allorigins.win/raw?url=${encodeURIComponent(result.thumbnail || '')}`;
                             } else if (!img.dataset.triedDirect) {
                               img.dataset.triedDirect = '1';
                               img.src = result.thumbnail || '';

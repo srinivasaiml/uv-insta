@@ -88,9 +88,9 @@ export default {
           if (v) video = v;
           if (t) thumbnail = t;
         }
-      } catch (e) { console.error("Embed Strategy failed"); }
+      } catch (e) { console.error("Embed failed:", e.message); }
 
-      // Strategy 2: GraphQL / API v1 (If embed fails)
+      // Strategy 2: API v1
       if (!video) {
         try {
           const mediaId = shortcodeToId(shortcode);
@@ -106,24 +106,31 @@ export default {
               thumbnail = item.image_versions2?.candidates?.[0]?.url || thumbnail;
             }
           }
-        } catch (e) { console.error("API v1 Strategy failed"); }
+        } catch (e) { console.error("API v1 failed:", e.message); }
       }
 
-      // Strategy 3: Scrape Main Page
+      // Strategy 3: RapidAPI Fallback (Inside Worker)
       if (!video) {
         try {
-          const pRes = await fetchIG(cleanUrl);
-          if (pRes.ok) {
-            const html = await pRes.text();
-            const { v, t } = parseHtml(html);
-            if (v) video = v;
-            if (t && !thumbnail) thumbnail = t;
+          const rRes = await fetch(`https://api.vkrtool.com/api/instagram?url=${encodeURIComponent(cleanUrl)}`);
+          if (rRes.ok) {
+            const rData = await rRes.json();
+            if (rData?.data?.[0]?.url) {
+              video = rData.data[0].url;
+              thumbnail = rData.data[0].thumbnail || thumbnail;
+            }
           }
-        } catch (e) { console.error("Scrape Strategy failed"); }
+        } catch (e) { console.error("Internal Fallback failed:", e.message); }
       }
 
       if (!video && !thumbnail) {
-        throw new Error("Could not extract media. The post might be private or restricted.");
+        return new Response(JSON.stringify({ 
+          success: false, 
+          error: "Media not found. The post might be private, deleted, or restricted by Instagram." 
+        }), {
+          status: 404,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
 
       return new Response(JSON.stringify({ 
@@ -135,7 +142,10 @@ export default {
       });
 
     } catch (err) {
-      return new Response(JSON.stringify({ success: false, error: err.message }), {
+      return new Response(JSON.stringify({ 
+        success: false, 
+        error: "Server Error: " + err.message 
+      }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });

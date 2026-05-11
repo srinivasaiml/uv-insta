@@ -15576,7 +15576,7 @@ var index_default = {
           if (t) thumbnail = t;
         }
       } catch (e) {
-        console.error("Embed Strategy failed");
+        console.error("Embed failed:", e.message);
       }
       if (!video) {
         try {
@@ -15594,24 +15594,31 @@ var index_default = {
             }
           }
         } catch (e) {
-          console.error("API v1 Strategy failed");
+          console.error("API v1 failed:", e.message);
         }
       }
       if (!video) {
         try {
-          const pRes = await fetchIG(cleanUrl);
-          if (pRes.ok) {
-            const html3 = await pRes.text();
-            const { v, t } = parseHtml(html3);
-            if (v) video = v;
-            if (t && !thumbnail) thumbnail = t;
+          const rRes = await fetch(`https://api.vkrtool.com/api/instagram?url=${encodeURIComponent(cleanUrl)}`);
+          if (rRes.ok) {
+            const rData = await rRes.json();
+            if (rData?.data?.[0]?.url) {
+              video = rData.data[0].url;
+              thumbnail = rData.data[0].thumbnail || thumbnail;
+            }
           }
         } catch (e) {
-          console.error("Scrape Strategy failed");
+          console.error("Internal Fallback failed:", e.message);
         }
       }
       if (!video && !thumbnail) {
-        throw new Error("Could not extract media. The post might be private or restricted.");
+        return new Response(JSON.stringify({
+          success: false,
+          error: "Media not found. The post might be private, deleted, or restricted by Instagram."
+        }), {
+          status: 404,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
       }
       return new Response(JSON.stringify({
         success: true,
@@ -15621,7 +15628,10 @@ var index_default = {
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     } catch (err) {
-      return new Response(JSON.stringify({ success: false, error: err.message }), {
+      return new Response(JSON.stringify({
+        success: false,
+        error: "Server Error: " + err.message
+      }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
